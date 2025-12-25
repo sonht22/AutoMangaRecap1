@@ -1,63 +1,87 @@
-# ui/panel_dock.py
-from PyQt6.QtWidgets import (QDockWidget, QWidget, QVBoxLayout, QGroupBox, 
-                             QSpinBox, QPushButton, QRadioButton, QFormLayout)
+# file: ui/panel_dock.py
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QGroupBox, QSpinBox, 
+                             QPushButton, QRadioButton, QLabel, QHBoxLayout, QDockWidget)
 from PyQt6.QtCore import Qt
 
 class PanelDock(QDockWidget):
     def __init__(self, parent=None):
         super().__init__("Panel Operations", parent)
-        self.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
+        self.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
         
-        content = QWidget()
-        layout = QVBoxLayout(content)
-
-        # --- NHÓM 1: PANEL DETECTION SETTINGS (GIỐNG ẢNH MẪU) ---
-        group_detect = QGroupBox("Panel Detection Settings")
-        form_layout = QFormLayout()
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         
-        # Width Adjustment (Cho phép số âm)
-        self.spin_width_adj = QSpinBox()
-        self.spin_width_adj.setRange(-100, 100) # Từ -100 đến +100
-        self.spin_width_adj.setValue(0)         # Mặc định 0
-        self.spin_width_adj.setSuffix(" px")
-        self.spin_width_adj.setToolTip("Số DƯƠNG: Mở rộng vùng cắt.\nSố ÂM: Thu nhỏ vùng cắt (cắt bớt viền trắng).")
+        # --- 1. SETTINGS QUÉT ---
+        grp_detect = QGroupBox("1. Panel Detection")
+        detect_layout = QVBoxLayout()
         
-        # Height Adjustment
-        self.spin_height_adj = QSpinBox()
-        self.spin_height_adj.setRange(-100, 100)
-        self.spin_height_adj.setValue(0)
-        self.spin_height_adj.setSuffix(" px")
+        # Nút Scan
+        self.btn_scan = QPushButton("🔍 Auto Scan (Quét Ảnh)")
+        self.btn_scan.setStyleSheet("background-color: #006666; color: white; padding: 6px; font-weight: bold;")
+        detect_layout.addWidget(self.btn_scan)
         
-        form_layout.addRow("Width Adjustment:", self.spin_width_adj)
-        form_layout.addRow("Height Adjustment:", self.spin_height_adj)
-        group_detect.setLayout(form_layout)
+        # Điều chỉnh kích thước
+        row_adj = QHBoxLayout()
+        self.spin_w = QSpinBox()
+        self.spin_w.setRange(-500, 500)
+        self.spin_w.setSuffix(" px (Rộng)")
+        self.spin_h = QSpinBox()
+        self.spin_h.setRange(-500, 500)
+        self.spin_h.setSuffix(" px (Cao)")
         
-        # --- NHÓM 2: PANEL CUTTING SETTINGS ---
-        group_cut = QGroupBox("Panel Cutting Settings")
-        v_layout = QVBoxLayout()
+        row_adj.addWidget(self.spin_w)
+        row_adj.addWidget(self.spin_h)
+        detect_layout.addLayout(row_adj)
         
-        self.radio_top_bottom = QRadioButton("Top to Bottom")
-        self.radio_top_bottom.setChecked(True)
-        self.radio_left_right = QRadioButton("Left to Right")
+        grp_detect.setLayout(detect_layout)
+        layout.addWidget(grp_detect)
         
-        v_layout.addWidget(self.radio_top_bottom)
-        v_layout.addWidget(self.radio_left_right)
-        group_cut.setLayout(v_layout)
-
-        # --- NÚT CẮT ---
-        self.btn_cut_trigger = QPushButton("✂️ Cut Panels")
+        # --- 2. CÔNG CỤ CHỈNH SỬA (CẬP NHẬT) ---
+        grp_tools = QGroupBox("2. Manual Tools")
+        tools_layout = QVBoxLayout() # Đổi sang xếp dọc cho đẹp
+        
+        # Hàng 1: Thêm và Xóa đã chọn
+        row_tools_1 = QHBoxLayout()
+        self.btn_add = QPushButton("➕ Thêm khung")
+        self.btn_del = QPushButton("🗑️ Xóa khung đã chọn") # <--- Đổi tên nút này
+        
+        row_tools_1.addWidget(self.btn_add)
+        row_tools_1.addWidget(self.btn_del)
+        
+        # Hàng 2: Xóa tất cả (Nút mới)
+        self.btn_clear_all = QPushButton("🧹 Xóa tất cả (Làm mới)")
+        self.btn_clear_all.setStyleSheet("background-color: #552200; color: #ffcccc;")
+        
+        tools_layout.addLayout(row_tools_1)
+        tools_layout.addWidget(self.btn_clear_all) # <--- Thêm nút xóa tất cả
+        
+        grp_tools.setLayout(tools_layout)
+        layout.addWidget(grp_tools)
+        
+        # --- 3. CÀI ĐẶT CẮT ---
+        grp_cut = QGroupBox("3. Cutting Settings")
+        cut_layout = QVBoxLayout()
+        
+        self.radio_top = QRadioButton("Top to Bottom (Dọc)")
+        self.radio_top.setChecked(True)
+        self.radio_left = QRadioButton("Left to Right (Ngang)")
+        
+        cut_layout.addWidget(self.radio_top)
+        cut_layout.addWidget(self.radio_left)
+        grp_cut.setLayout(cut_layout)
+        layout.addWidget(grp_cut)
+        
+        # --- 4. NÚT CẮT LỚN ---
+        self.btn_cut_trigger = QPushButton("✂️ Cut Panels & Save")
+        self.btn_cut_trigger.setFixedHeight(50)
         self.btn_cut_trigger.setStyleSheet("""
-            QPushButton {
-                background-color: #2b2b2b; color: white; padding: 12px; 
-                font-weight: bold; border-radius: 4px; font-size: 14px;
+            QPushButton { 
+                background-color: #333; color: white; 
+                border: 2px solid #555; font-weight: bold; font-size: 14px; 
             }
-            QPushButton:hover { background-color: #444; }
+            QPushButton:hover { background-color: #cc0000; border-color: red; }
         """)
-
-        layout.addWidget(group_detect)
-        layout.addWidget(group_cut)
         layout.addWidget(self.btn_cut_trigger)
-        layout.addStretch()
-
-        content.setLayout(layout)
-        self.setWidget(content)
+        
+        self.setWidget(container)

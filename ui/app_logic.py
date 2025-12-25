@@ -1,295 +1,250 @@
 import os
 import shutil
-import re # Thư viện để tìm số trong chuỗi (cho tính năng sắp xếp)
-from PyQt6.QtWidgets import QFileDialog, QListWidgetItem, QTableWidgetItem, QMessageBox
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QFileDialog, QMessageBox, QTableWidgetItem, QListWidgetItem, QProgressDialog
 from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import Qt
 
-# Import module cắt ảnh
-from core.smart_cut import SmartCutter 
+# --- IMPORT MODULE AN TOÀN ---
+smart_cut = None
+try:
+    import cv2 
+    from core import smart_cut
+except ImportError as e:
+    print(f"Lỗi Import: {e}")
 
 class AppLogic:
     def __init__(self, main_window):
-        # Lưu tham chiếu đến giao diện chính
-        self.mw = main_window 
+        self.ui = main_window 
+        
         self.current_folder = ""
-        self.is_loading = False # Cờ hiệu để tránh xung đột khi đang load dữ liệu
+        self.current_file_path = ""
+        self.current_cv_image = None
+        
+        self.cached_rects = {} 
+        self.is_renaming = False
+        
+        self.setup_connections()
+        
+    def setup_connections(self):
+        dock = self.ui.panel_dock
+        dock.btn_scan.clicked.connect(self.action_auto_scan)
+        dock.btn_add.clicked.connect(self.ui.viewer.add_manual_rect)
+        dock.btn_del.clicked.connect(self.ui.viewer.delete_selected)
+        dock.btn_clear_all.clicked.connect(self.action_reset_all)
+        try: dock.btn_cut_trigger.clicked.disconnect()
+        except: pass
+        dock.btn_cut_trigger.clicked.connect(self.action_smart_cut)
+        self.ui.image_list.itemChanged.connect(self.handle_rename_file)
+        if hasattr(self.ui.image_list, 'orderChanged'):
+            self.ui.image_list.orderChanged.connect(self.sync_table_order)
+        if hasattr(self.ui, 'toolbar'):
+            if hasattr(self.ui.toolbar, 'action_open'):
+                try: self.ui.toolbar.action_open.triggered.disconnect()
+                except: pass
+                self.ui.toolbar.action_open.triggered.connect(self.action_load_folder)
+            if hasattr(self.ui.toolbar, 'action_sort'):
+                try: self.ui.toolbar.action_sort.triggered.disconnect()
+                except: pass
+                self.ui.toolbar.action_sort.triggered.connect(self.action_auto_sort)
 
-    # =======================================================
-    # 1. QUẢN LÝ FILE & FOLDER
-    # =======================================================
+    def action_reset_all(self):
+        if not self.current_folder: return
+        reply = QMessageBox.question(self.ui, "Làm mới tất cả", 
+                                     "Bạn có chắc muốn xóa hết dữ liệu khung đã quét và tải lại danh sách không?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            self.cached_rects = {}
+            self.current_cv_image = None
+            self.ui.viewer.clear_rects()
+            self.reload_list()
+            QMessageBox.information(self.ui, "Đã làm mới", "Đã reset dữ liệu và cập nhật lại danh sách file!")
+
     def action_load_folder(self):
-        folder = QFileDialog.getExistingDirectory(self.mw, "Chọn thư mục")
+        folder = QFileDialog.getExistingDirectory(self.ui, "Chọn Folder Truyện")
         if folder:
-            self.load_images_to_ui(folder)
+            self.current_folder = folder
+            self.cached_rects = {} 
+            self.reload_list()
 
-    def load_images_to_ui(self, folder_path):
-        self.current_folder = folder_path
-        self.mw.image_list.clear()
-        self.is_loading = True # Bật cờ đang load
-        
-        self.mw.setWindowTitle(f"Auto Manga Recap - {os.path.basename(folder_path)}")
-        
-        # Lấy danh sách ảnh
-        files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))])
-        self.mw.table.setRowCount(len(files))
-        
-        for i, f in enumerate(files):
-            # Tạo Item cho danh sách bên trái
-            item = QListWidgetItem(f)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable) # Cho phép sửa tên
-            item.setData(Qt.ItemDataRole.UserRole, f) # Lưu tên gốc vào bộ nhớ ẩn
-            self.mw.image_list.addItem(item)
-            
-            # Tạo dòng cho bảng bên phải
-            self.mw.table.setItem(i, 0, QTableWidgetItem(str(i+1)))
-            self.mw.table.setItem(i, 1, QTableWidgetItem(f))
-            self.mw.table.setItem(i, 2, QTableWidgetItem(""))
-            self.mw.table.setItem(i, 3, QTableWidgetItem(""))
-            
-        self.is_loading = False # Tắt cờ load
-        print(f"✅ Đã load {len(files)} ảnh từ: {folder_path}")
+    def reload_list(self):
+        self.ui.image_list.clear()
+        if not self.current_folder: return
+        if os.path.exists(self.current_folder):
+            files = sorted([f for f in os.listdir(self.current_folder) if f.lower().endswith(('.jpg', '.png', '.jpeg', '.webp'))])
+            self.is_renaming = True
+            for f in files:
+                item = QListWidgetItem(f)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                item.setData(Qt.ItemDataRole.UserRole, f)
+                self.ui.image_list.addItem(item)
+            self.is_renaming = False
+        else:
+            QMessageBox.warning(self.ui, "Lỗi", "Thư mục không tồn tại!")
 
-    def display_image(self, row_index):
-        if row_index < 0: return
-        file_name = self.mw.image_list.item(row_index).text()
-        full_path = os.path.join(self.current_folder, file_name)
-        
-        if os.path.exists(full_path):
-            pixmap = QPixmap(full_path)
-            if not pixmap.isNull():
-                self.mw.viewer.set_photo(pixmap)
-
-    # =======================================================
-    # 2. ĐỔI TÊN FILE (RENAME)
-    # =======================================================
     def handle_rename_file(self, item):
-        # Nếu đang load hoặc không có folder thì dừng
-        if self.is_loading or not self.current_folder: return
-
-        new_name = item.text().strip()
+        if self.is_renaming or not self.current_folder: return
+        new_name = item.text()
         old_name = item.data(Qt.ItemDataRole.UserRole)
-        
-        # Nếu tên không đổi -> Dừng
-        if not old_name or new_name == old_name:
-            return
-
-        print(f"✏️ Đang đổi tên: '{old_name}' -> '{new_name}'")
-
-        # KHÓA GIAO DIỆN (Để tránh vòng lặp vô hạn)
-        self.mw.image_list.blockSignals(True)
-
-        try:
-            # Tự động thêm đuôi file nếu thiếu (vd: .jpg)
-            _, ext = os.path.splitext(old_name)
-            if not new_name.lower().endswith(ext.lower()):
-                new_name += ext
-            
+        if old_name and new_name != old_name:
             old_path = os.path.join(self.current_folder, old_name)
             new_path = os.path.join(self.current_folder, new_name)
+            try:
+                os.rename(old_path, new_path)
+                if old_name in self.cached_rects:
+                    self.cached_rects[new_name] = self.cached_rects.pop(old_name)
+                self.is_renaming = True
+                item.setData(Qt.ItemDataRole.UserRole, new_name)
+                self.is_renaming = False
+                if self.current_file_path == old_path:
+                    self.current_file_path = new_path
+            except Exception as e:
+                self.is_renaming = True
+                item.setText(old_name)
+                self.is_renaming = False
+                QMessageBox.warning(self.ui, "Lỗi", f"Không thể đổi tên file:\n{e}")
 
-            # Đổi tên file thật trên ổ cứng
-            os.rename(old_path, new_path)
-            print("✅ Đổi tên thành công!")
-
-            # Cập nhật lại giao diện và bộ nhớ ẩn
-            item.setText(new_name)
-            item.setData(Qt.ItemDataRole.UserRole, new_name)
-            
-            # Đồng bộ sang bảng bên phải
-            self._sync_table_internal()
-
-        except OSError as e:
-            print(f"❌ Lỗi đổi tên: {e}")
-            item.setText(old_name) # Trả về tên cũ nếu lỗi
-            QMessageBox.warning(self.mw, "Lỗi", f"Không thể đổi tên!\n{e}")
-
-        finally:
-            # MỞ KHÓA GIAO DIỆN
-            self.mw.image_list.blockSignals(False)
-
-    # =======================================================
-    # 3. [NÂNG CẤP] SẮP XẾP & ĐỒNG BỘ FOLDER (AUTO SORT)
-    # =======================================================
     def action_auto_sort(self):
-        count = self.mw.image_list.count()
+        count = self.ui.image_list.count()
         if count == 0: return
-
-        print("🔄 Đang sắp xếp danh sách...")
-        
-        # 1. Nhấc item ra và Sắp xếp (Natural Sort)
-        items = []
-        while self.mw.image_list.count() > 0:
-            item = self.mw.image_list.takeItem(0)
-            items.append(item)
-
+        items = [self.ui.image_list.takeItem(0) for _ in range(count)]
+        import re
         def natural_key(item):
             return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', item.text())]
-
         items.sort(key=natural_key)
+        for item in items: self.ui.image_list.addItem(item)
 
-        # Đưa lại vào List Widget
-        for item in items:
-            self.mw.image_list.addItem(item)
+    def sync_table_order(self): pass
+
+    def save_current_rects_to_cache(self):
+        if self.current_file_path:
+            filename = os.path.basename(self.current_file_path)
+            rects = self.ui.viewer.get_rects()
+            self.cached_rects[filename] = rects
+
+    def display_image(self, row):
+        self.save_current_rects_to_cache()
+
+        item = self.ui.image_list.item(row)
+        if not item: return
         
-        # --- [MỚI] ĐỒNG BỘ TÊN FILE TRONG FOLDER ---
-        reply = QMessageBox.question(self.mw, "Đồng bộ Folder", 
-                                     "Bạn có muốn ĐỔI TÊN tất cả file trong folder thành số thứ tự (001.jpg, 002.jpg...) \n"
-                                     "để sắp xếp folder giống hệt trên App không?",
+        filename = item.text()
+        path = os.path.join(self.current_folder, filename)
+        if not os.path.exists(path): return
+
+        self.current_file_path = path
+        
+        pixmap = QPixmap(path)
+        # --- THAY ĐỔI Ở ĐÂY: maintain_zoom=True ---
+        self.ui.viewer.set_image(pixmap, maintain_zoom=True) 
+        # ------------------------------------------
+        self.current_cv_image = None
+        
+        self.ui.viewer.clear_rects()
+        if filename in self.cached_rects:
+            for r in self.cached_rects[filename]:
+                self.ui.viewer.add_rect(*r)
+        
+    def action_auto_scan(self):
+        if smart_cut is None:
+            QMessageBox.critical(self.ui, "Thiếu Thư Viện", "Chưa cài 'opencv-python' hoặc lỗi module core.")
+            return
+        if not self.current_folder: 
+            QMessageBox.warning(self.ui, "Chưa chọn Folder", "Vui lòng chọn thư mục truyện trước!")
+            return
+        reply = QMessageBox.question(self.ui, "Quét Tự Động", 
+                                     "Bạn muốn quét tất cả ảnh trong danh sách hay chỉ ảnh hiện tại?",
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            self._batch_rename_sequence(items)
-        
-        # Đồng bộ bảng
-        self.sync_table_order()
-        print("✅ Hoàn tất sắp xếp!")
-
-    def _batch_rename_sequence(self, items):
-        """Hàm đổi tên hàng loạt an toàn (2 bước)"""
-        print("🚀 Bắt đầu đổi tên hàng loạt...")
-        self.mw.image_list.blockSignals(True) # Khóa giao diện
-        
-        try:
-            # Bước 1: Đổi sang tên tạm (temp_xxxx) để tránh trùng lặp
-            # Ví dụ: Muốn đổi "2.jpg" thành "1.jpg", nhưng "1.jpg" đang tồn tại -> Phải đổi sang tên tạm trước.
-            temp_map = [] # Lưu cặp (tên tạm, đuôi file)
-            
-            for i, item in enumerate(items):
-                old_name = item.text() # Tên hiện tại (VD: 1.jpg)
-                old_path = os.path.join(self.current_folder, old_name)
-                
-                _, ext = os.path.splitext(old_name)
-                
-                # Tạo tên tạm ngẫu nhiên hoặc theo số lớn
-                temp_name = f"temp_recap_{i:04d}{ext}"
-                temp_path = os.path.join(self.current_folder, temp_name)
-                
-                os.rename(old_path, temp_path)
-                temp_map.append((temp_name, ext)) # Nhớ tên tạm và đuôi file
-            
-            # Bước 2: Đổi từ tên tạm sang tên chuẩn (001.jpg, 002.jpg...)
-            for i, (temp_name, ext) in enumerate(temp_map):
-                new_name = f"{i+1:03d}{ext}" # VD: 001.jpg
-                
-                temp_path = os.path.join(self.current_folder, temp_name)
-                new_path = os.path.join(self.current_folder, new_name)
-                
-                os.rename(temp_path, new_path)
-                
-                # Cập nhật lại tên trên giao diện App
-                items[i].setText(new_name)
-                items[i].setData(Qt.ItemDataRole.UserRole, new_name)
-            
-            print("✅ Đã đổi tên toàn bộ file trong folder!")
-            QMessageBox.information(self.mw, "Thành công", "Đã đổi tên và sắp xếp folder xong!")
-            
-        except Exception as e:
-            print(f"❌ Lỗi khi đổi tên hàng loạt: {e}")
-            QMessageBox.critical(self.mw, "Lỗi", f"Có lỗi xảy ra khi đổi tên: {e}")
-            # Nếu lỗi, nên load lại folder để đảm bảo hiển thị đúng
-            self.load_images_to_ui(self.current_folder)
-            
-        finally:
-            self.mw.image_list.blockSignals(False)
-
-    # =======================================================
-    # 4. CẮT ẢNH (SMART CUT)
-    # =======================================================
-    # ... (Trong file ui/app_logic.py) ...
+        scan_all = (reply == QMessageBox.StandardButton.Yes)
+        dock = self.ui.panel_dock
+        w_adj = dock.spin_w.value()
+        h_adj = dock.spin_h.value()
+        if scan_all:
+            count = self.ui.image_list.count()
+            progress = QProgressDialog("Đang quét toàn bộ ảnh...", "Hủy", 0, count, self.ui)
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(0)
+            for i in range(count):
+                if progress.wasCanceled(): break
+                item = self.ui.image_list.item(i)
+                fname = item.text()
+                fpath = os.path.join(self.current_folder, fname)
+                try:
+                    rects, _ = smart_cut.analyze_panels_coordinates(fpath)
+                    if rects is None: rects = []
+                    adj_rects = [(x, y, w+w_adj, h+h_adj) for (x,y,w,h) in rects]
+                    self.cached_rects[fname] = adj_rects
+                except Exception as e:
+                    print(f"Lỗi quét {fname}: {e}")
+                progress.setValue(i + 1)
+            current_name = os.path.basename(self.current_file_path) if self.current_file_path else ""
+            if current_name in self.cached_rects:
+                self.ui.viewer.clear_rects()
+                for r in self.cached_rects[current_name]:
+                    self.ui.viewer.add_rect(*r)
+            QMessageBox.information(self.ui, "Xong", "Đã quét xong toàn bộ danh sách!")
+        else:
+            if not self.current_file_path: return
+            try:
+                rects, cv_img = smart_cut.analyze_panels_coordinates(self.current_file_path)
+                if rects is None: rects = []
+                self.current_cv_image = cv_img 
+                self.ui.viewer.clear_rects()
+                for (x, y, w, h) in rects:
+                    self.ui.viewer.add_rect(x, y, w + w_adj, h + h_adj)
+                self.save_current_rects_to_cache()
+            except Exception as e:
+                QMessageBox.critical(self.ui, "Lỗi", f"Lỗi quét ảnh này: {e}")
 
     def action_smart_cut(self):
-        if not self.current_folder:
-            QMessageBox.warning(self.mw, "Lỗi", "Chưa chọn folder!")
+        if smart_cut is None: return
+        self.save_current_rects_to_cache()
+        if not self.cached_rects:
+            QMessageBox.warning(self.ui, "Chưa có dữ liệu", "Vui lòng Scan ảnh hoặc thêm khung trước!")
             return
-
-        # [MỚI] Lấy thông số Adjustment từ giao diện PanelDock
-        w_adj = self.mw.panel_dock.spin_width_adj.value()
-        h_adj = self.mw.panel_dock.spin_height_adj.value()
-
-        reply = QMessageBox.question(self.mw, "Cắt Ảnh", 
-                                     f"Cắt với thông số điều chỉnh:\nWidth: {w_adj}px\nHeight: {h_adj}px\n\n"
-                                     "Tiếp tục?",
+        count_cached = len(self.cached_rects)
+        reply = QMessageBox.question(self.ui, "Cắt Panel", 
+                                     f"Bạn đang có dữ liệu khung của {count_cached} ảnh.\nBạn muốn cắt TOÀN BỘ hay chỉ ẢNH HIỆN TẠI?",
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        
-        if reply == QMessageBox.StandardButton.No: return
-
+        cut_all = (reply == QMessageBox.StandardButton.Yes)
+        dock = self.ui.panel_dock
         output_folder = os.path.join(self.current_folder, "cut_panels")
-        if os.path.exists(output_folder): shutil.rmtree(output_folder)
-        os.makedirs(output_folder)
+        files_to_process = []
+        if cut_all:
+            for fname, rects in self.cached_rects.items():
+                if rects: files_to_process.append((fname, rects))
+        else:
+            curr_name = os.path.basename(self.current_file_path) if self.current_file_path else ""
+            if curr_name in self.cached_rects:
+                files_to_process.append((curr_name, self.cached_rects[curr_name]))
+        if not files_to_process: return
+        progress = QProgressDialog("Đang cắt và lưu ảnh...", "Hủy", 0, len(files_to_process), self.ui)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        saved_paths_all = []
+        for i, (fname, rects) in enumerate(files_to_process):
+            if progress.wasCanceled(): break
+            fpath = os.path.join(self.current_folder, fname)
+            if dock.radio_top.isChecked(): rects.sort(key=lambda r: r[1])
+            else: rects.sort(key=lambda r: r[0])
+            try:
+                stream = open(fpath, "rb")
+                bytes_data = bytearray(stream.read())
+                import numpy as np
+                np_arr = np.asarray(bytes_data, dtype=np.uint8)
+                img = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
+                if img is not None:
+                    prefix = os.path.splitext(fname)[0] + "_p"
+                    saved = smart_cut.save_cropped_images(img, rects, output_folder, file_prefix=prefix)
+                    saved_paths_all.extend(saved)
+            except Exception as e:
+                print(f"Lỗi cắt {fname}: {e}")
+            progress.setValue(i + 1)
+        QMessageBox.information(self.ui, "Hoàn tất", f"Đã lưu {len(saved_paths_all)} panel vào:\n{output_folder}")
+        self.update_table_results(saved_paths_all)
 
-        cutter = SmartCutter()
-        total_panels = 0
-        count = self.mw.image_list.count()
-
-        if count == 0: return
-
-        self.mw.image_list.blockSignals(True)
-        self.mw.setWindowTitle("⏳ Đang cắt ảnh (Advanced Mode)...")
-
-        try:
-            for i in range(count):
-                file_name = self.mw.image_list.item(i).text()
-                img_path = os.path.join(self.current_folder, file_name)
-                
-                # [QUAN TRỌNG] Truyền w_adj và h_adj vào
-                num = cutter.process_image(img_path, output_folder, total_panels + 1, 
-                                           w_adj=w_adj, 
-                                           h_adj=h_adj)
-                
-                total_panels += num
-                print(f"-> Cắt {file_name}: {num} khung")
-                
-                from PyQt6.QtWidgets import QApplication
-                QApplication.processEvents()
-
-            QMessageBox.information(self.mw, "Xong", f"Đã cắt được {total_panels} khung tranh!")
-            self.load_images_to_ui(output_folder)
-
-        except Exception as e:
-            QMessageBox.critical(self.mw, "Lỗi", str(e))
-        
-        finally:
-            self.mw.image_list.blockSignals(False)
-            self.mw.setWindowTitle(f"Auto Manga Recap - {os.path.basename(self.current_folder)}")
-
-    # =======================================================
-    # 5. ĐỒNG BỘ BẢNG (SYNC)
-    # =======================================================
-    def sync_table_order(self):
-        """Hàm gọi từ bên ngoài (khi kéo thả)"""
-        self._sync_table_internal()
-
-    def _sync_table_internal(self):
-        """Hàm nội bộ để vẽ lại bảng bên phải dựa theo list bên trái"""
-        if self.is_loading: return
-        
-        self.mw.table.blockSignals(True)
-        self.mw.table.setUpdatesEnabled(False)
-        try:
-            # Lưu script cũ
-            old_data = {}
-            for row in range(self.mw.table.rowCount()):
-                item_name = self.mw.table.item(row, 1)
-                item_script = self.mw.table.item(row, 2)
-                if item_name:
-                    filename = item_name.text()
-                    script = item_script.text() if item_script else ""
-                    old_data[filename] = script
-
-            # Vẽ lại bảng
-            count = self.mw.image_list.count()
-            self.mw.table.setRowCount(count)
-
-            for i in range(count):
-                file_name = self.mw.image_list.item(i).text()
-                
-                self.mw.table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-                self.mw.table.setItem(i, 1, QTableWidgetItem(file_name))
-                
-                script_text = old_data.get(file_name, "")
-                self.mw.table.setItem(i, 2, QTableWidgetItem(script_text))
-                self.mw.table.setItem(i, 3, QTableWidgetItem(""))
-        except Exception: pass
-        self.mw.table.setUpdatesEnabled(True)
-        self.mw.table.blockSignals(False)
+    def update_table_results(self, files):
+        self.ui.table.setRowCount(0)
+        for i, path in enumerate(files):
+            filename = os.path.basename(path)
+            self.ui.table.insertRow(i)
+            self.ui.table.setItem(i, 0, QTableWidgetItem(str(i+1)))
+            self.ui.table.setItem(i, 1, QTableWidgetItem(filename))
