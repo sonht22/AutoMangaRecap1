@@ -75,17 +75,17 @@ class MagaRecapClone(QMainWindow):
         self.btn_analyze = QPushButton("✨ Phân tích AI (Coming Soon)")
         self.btn_analyze.setStyleSheet("background-color: #8A2BE2; color: white; padding: 6px; font-weight: bold;")
         
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["ID", "File Ảnh", "OCR Text", "Translation"])
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["ID", "File Ảnh", "OCR Text", "Translation", "VOI"])
         self.table.setColumnHidden(1, True) # Ẩn cột dịch tạm thời
         self.table.setWordWrap(True)
         
         # Cấu hình Bảng Pro (Excel Style)
         if MultiLineDelegate:
             delegate = MultiLineDelegate(self.table)
-            self.table.setItemDelegateForColumn(2, delegate) # Cột OCR
-            # --- [MỚI] Áp dụng luôn cho cột Translation (Cột 3) ---
+            self.table.setItemDelegateForColumn(2, delegate)
             self.table.setItemDelegateForColumn(3, delegate)
+            # Cột VOI (Cột 4) không cần delegate edit vì nó chứa đường dẫn file
         
         self.table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked | 
                                    QTableWidget.EditTrigger.AnyKeyPressed |
@@ -126,11 +126,15 @@ class MagaRecapClone(QMainWindow):
             if hasattr(self.toolbar, 'action_open'):
                 self.toolbar.action_open.triggered.connect(self.logic.action_load_folder)
 
-            # 2. Nút Lưu Project
+           # 2. Nút Lưu (Lưu Nhanh)
             if hasattr(self.toolbar, 'action_save'):
                 self.toolbar.action_save.triggered.connect(self.logic.save_project)
 
-            # 3. Nút Mở Project
+            # [MỚI] 3. Nút Lưu Mới (Save As)
+            if hasattr(self.toolbar, 'action_save_as'):
+                self.toolbar.action_save_as.triggered.connect(self.logic.save_project_as)
+
+            # 4. Nút Mở Project
             if hasattr(self.toolbar, 'action_load_project'):
                 self.toolbar.action_load_project.triggered.connect(self.logic.load_project)
             
