@@ -25,6 +25,12 @@ try:
 except ImportError as e:
     print(f"Lỗi Import Core: {e}")
 
+# Import hàm xử lý ảnh OCR (Nếu có)
+try:
+    from core.ocr_utils import preprocess_image
+except ImportError:
+    preprocess_image = None
+
 
 class AppLogic:
     def __init__(self, main_window):
@@ -38,6 +44,9 @@ class AppLogic:
         
         self.cached_rects = {} 
         self.is_renaming = False
+
+        # [MỚI] Cờ để kiểm soát đồng bộ (tránh vòng lặp vô tận)
+        self.is_syncing = False 
         
         # Khởi tạo kết nối ngay khi chạy
         self.setup_connections()
@@ -45,8 +54,17 @@ class AppLogic:
     def setup_connections(self):
         """KẾT NỐI TÍN HIỆU TỪ GIAO DIỆN XUỐNG LOGIC"""
         
-        # 1. KẾT NỐI DANH SÁCH ẢNH & TOOLBAR
+        # 1. KẾT NỐI DANH SÁCH ẢNH & TABLE (ĐỒNG BỘ 2 CHIỀU)
+        # Khi bấm vào item trong List -> Gọi hàm sync_from_list
+        self.ui.image_list.itemClicked.connect(self.sync_from_list)
+        # Khi đổi tên file
         self.ui.image_list.itemChanged.connect(self.handle_rename_file)
+        
+        # Khi bấm vào ô trong Table -> Gọi hàm sync_from_table
+        self.ui.table.cellClicked.connect(self.sync_from_table)
+        # Khi dùng phím mũi tên lên xuống trong Table
+        self.ui.table.currentCellChanged.connect(self.sync_from_table_keyboard)
+
         if hasattr(self.ui.image_list, 'orderChanged'):
             self.ui.image_list.orderChanged.connect(self.sync_table_order)
             
@@ -74,34 +92,104 @@ class AppLogic:
         # 3. KẾT NỐI PANEL DỊCH & TTS (TRANS DOCK)
         if hasattr(self.ui, 'trans_dock'):
             dock_trans = self.ui.trans_dock
-            # Nút OCR
             dock_trans.btn_ocr.clicked.connect(self.action_ocr_scan)
-            # Nút Dịch
             dock_trans.btn_translate.clicked.connect(self.action_translate_text)
-            # Nút TTS (Tạo Audio)
             dock_trans.btn_tts.clicked.connect(self.action_generate_audio)
             
-            # [MỚI] Sự kiện đổi Provider (ElevenLabs <-> Minimax)
             if hasattr(dock_trans, 'combo_provider'):
                 dock_trans.combo_provider.currentIndexChanged.connect(self.update_tts_options)
 
-    # --- [MỚI] HÀM CẬP NHẬT MODEL KHI ĐỔI PROVIDER ---
+    # --- [MỚI] CÁC HÀM ĐỒNG BỘ HÓA (CORE LOGIC) ---
+    
+    def sync_from_list(self, item):
+        """Khi click vào List bên trái -> Đồng bộ sang Table và hiển thị ảnh"""
+        if self.is_syncing: return # Nếu đang đồng bộ thì thôi, tránh lặp
+        
+        self.is_syncing = True
+        try:
+            row = self.ui.image_list.row(item)
+            # 1. Hiển thị ảnh
+            self.display_image(row)
+            # 2. Chọn dòng tương ứng bên Table
+            self.ui.table.selectRow(row)
+        finally:
+            self.is_syncing = False
+
+    def sync_from_table(self, row, col):
+        """Khi click vào Table bên phải -> Đồng bộ sang List và hiển thị ảnh"""
+        if self.is_syncing: return
+        
+        self.is_syncing = True
+        try:
+            # 1. Chọn item tương ứng bên List
+            self.ui.image_list.setCurrentRow(row)
+            # 2. Hiển thị ảnh
+            self.display_image(row)
+        finally:
+            self.is_syncing = False
+
+    def sync_from_table_keyboard(self, currentRow, currentColumn, previousRow, previousColumn):
+        """Hỗ trợ khi dùng phím mũi tên trong bảng"""
+        if currentRow != previousRow and currentRow >= 0:
+            self.sync_from_table(currentRow, 0)
+
+    # --- HÀM HIỂN THỊ ẢNH (QUAN TRỌNG) ---
+    def display_image(self, row):
+        # 1. Lưu lại khung cắt của ảnh cũ (nếu có) trước khi chuyển
+        self.save_current_rects_to_cache()
+        
+        # 2. Lấy tên file từ List
+        item = self.ui.image_list.item(row)
+        if not item: return
+        
+        filename = item.text()
+        path = os.path.join(self.current_folder, filename)
+        
+        if not os.path.exists(path): return
+        
+        self.current_file_path = path
+        
+        # 3. Hiển thị ảnh lên Viewer
+        # Dùng hàm đọc ảnh UTF-8 (nếu có) hoặc mặc định
+        try:
+            from core.ocr_utils import read_image_utf8
+            cv_img = read_image_utf8(path)
+            if cv_img is not None:
+                # Convert CV2 to QPixmap để hiển thị
+                height, width, channel = cv_img.shape
+                bytesPerLine = 3 * width
+                # Chuyển BGR sang RGB
+                cv_img_rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+                from PyQt6.QtGui import QImage
+                qImg = QImage(cv_img_rgb.data, width, height, bytesPerLine, QImage.Format.Format_RGB888)
+                self.ui.viewer.set_image(QPixmap.fromImage(qImg), maintain_zoom=True)
+            else:
+                self.ui.viewer.set_image(QPixmap(path), maintain_zoom=True)
+        except:
+             self.ui.viewer.set_image(QPixmap(path), maintain_zoom=True)
+        
+        self.current_cv_image = None
+        
+        # 4. Load lại các khung cắt đã lưu (nếu có)
+        self.ui.viewer.clear_rects()
+        if filename in self.cached_rects:
+            for r in self.cached_rects[filename]: 
+                self.ui.viewer.add_rect(*r)
+
+    # --- HÀM CẬP NHẬT MODEL TTS ---
     def update_tts_options(self):
         dock = self.ui.trans_dock
         provider = dock.combo_provider.currentText()
         dock.combo_model.clear()
         
         if provider == "Minimax":
-            # Các model của Minimax
             dock.combo_model.addItems(["speech-01-turbo", "speech-01-hd", "speech-2.6-hd"])
             dock.combo_voice.setPlaceholderText("Nhập ID Minimax (VD: 2095...)")
         else:
-            # Các model của ElevenLabs
             dock.combo_model.addItems(["eleven_multilingual_v2", "eleven_turbo_v2"])
             dock.combo_voice.setPlaceholderText("Nhập ID ElevenLabs...")
 
-
-    # --- 1. HÀM OCR (GIỮ NGUYÊN TỪ FILE GỐC CỦA BẠN) ---
+    # --- 1. HÀM OCR (ĐÃ CÓ XỬ LÝ ẢNH) ---
     def action_ocr_scan(self):
         if easyocr is None:
             QMessageBox.critical(self.ui, "Thiếu thư viện", "Chưa cài 'easyocr'.")
@@ -125,7 +213,6 @@ class AppLogic:
         selected_rows = sorted(list(set([item.row() for item in self.ui.table.selectedItems()])))
         rows_to_process = selected_rows if selected_rows else range(row_count)
         
-        # Nếu không chọn dòng nào thì hỏi
         if not selected_rows:
             reply = QMessageBox.question(self.ui, "OCR", f"Quét toàn bộ {row_count} ảnh?",
                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
@@ -164,8 +251,24 @@ class AppLogic:
                 continue
 
             try:
-                with open(final_path, "rb") as f: file_bytes = f.read()
-                results = reader.readtext(file_bytes, detail=0, paragraph=True)
+                # --- XỬ LÝ ẢNH TRƯỚC KHI QUÉT ---
+                image_input = None
+                if preprocess_image:
+                    try:
+                        image_input = preprocess_image(final_path)
+                    except Exception as err:
+                        print(f"Lỗi xử lý ảnh {fname}: {err}")
+                        image_input = None 
+                
+                if image_input is None:
+                    # Nếu không xử lý được (hoặc không import được), đọc thủ công fix lỗi tiếng Việt
+                    try:
+                        from core.ocr_utils import read_image_utf8
+                        image_input = read_image_utf8(final_path)
+                    except:
+                        with open(final_path, "rb") as f: image_input = f.read()
+
+                results = reader.readtext(image_input, detail=0, paragraph=True, batch_size=4)
                 full_text = "\n".join(results).strip()
                 
                 item_text = QTableWidgetItem(full_text)
@@ -179,9 +282,10 @@ class AppLogic:
 
             progress.setValue(i + 1)
             QApplication.processEvents()
+        
         QMessageBox.information(self.ui, "Hoàn tất", "Đã quét xong văn bản!")
 
-    # --- 2. HÀM DỊCH THUẬT (GIỮ NGUYÊN TỪ FILE GỐC CỦA BẠN) ---
+    # --- 2. HÀM DỊCH THUẬT (GIỮ NGUYÊN) ---
     def action_translate_text(self):
         if GoogleTranslator is None:
             QMessageBox.critical(self.ui, "Thiếu thư viện", "Chưa cài 'deep-translator'.")
@@ -269,9 +373,7 @@ class AppLogic:
 
         QMessageBox.information(self.ui, "Hoàn tất", "Đã dịch xong!")
 
-    # --- 3. HÀM TẠO AUDIO (ĐÃ TÍCH HỢP MINIMAX & ELEVENLABS) ---
-    # --- [CẬP NHẬT FIX LỖI 401] HÀM TẠO AUDIO ---
-    # --- [BẢN FIX 401 & HỖ TRỢ GIỌNG TỰ THÊM] ---
+    # --- 3. HÀM TẠO AUDIO ---
     def action_generate_audio(self):
         try: import requests
         except ImportError: return
@@ -286,15 +388,10 @@ class AppLogic:
         provider = dock.combo_provider.currentText()
         model_id = dock.combo_model.currentText()
         
-        # Lấy Voice ID (Thông minh)
-        # 1. Thử lấy từ Data (nếu chọn từ danh sách đã lưu)
         voice_id = dock.combo_voice.currentData()
-        # 2. Nếu không có Data (do nhập tay hoặc copy paste), lấy Text
         if not voice_id:
             raw_text = dock.combo_voice.currentText().strip()
-            # Nếu người dùng chọn kiểu "Tên (ID)" mà code chưa bắt được data
             if "(" in raw_text and ")" in raw_text:
-                # Tách lấy phần trong ngoặc cuối cùng
                 voice_id = raw_text.split("(")[-1].replace(")", "").strip()
             else:
                 voice_id = raw_text
@@ -315,7 +412,6 @@ class AppLogic:
         progress.setMinimumDuration(0)
         progress.show()
 
-        # --- [FIX HEADERS] Chỉ dùng xi-api-key chuẩn ---
         headers = {
             "Content-Type": "application/json",
             "xi-api-key": api_key
@@ -334,22 +430,20 @@ class AppLogic:
                 continue
 
             try:
-                # --- CẤU HÌNH PAYLOAD ---
                 if provider == "Minimax":
                     url_create = "https://api.ai33.pro/v1m/task/text-to-speech"
                     payload = {
                         "text": text_to_speak,
-                        "model": "speech-01-turbo", # [QUAN TRỌNG] Dùng model này ổn định hơn HD
+                        "model": "speech-01-turbo",
                         "voice_setting": {
                             "voice_id": voice_id,
                             "vol": 1, "pitch": 0, "speed": 1
                         },
                         "language_boost": "Auto"
                     }
-                    # Nếu người dùng chọn model khác trên UI thì ưu tiên UI
                     if "hd" in model_id.lower(): payload["model"] = model_id
                     
-                else: # ElevenLabs
+                else: 
                     url_create = f"https://api.ai33.pro/v1/text-to-speech/{voice_id}?output_format=mp3_44100_128"
                     payload = {
                         "text": text_to_speak,
@@ -357,7 +451,6 @@ class AppLogic:
                         "with_transcript": False
                     }
 
-                # GỬI REQUEST
                 progress.setLabelText(f"Dòng {row+1}: Gửi yêu cầu...")
                 QApplication.processEvents()
                 
@@ -365,7 +458,7 @@ class AppLogic:
                 
                 if response.status_code != 200:
                     err = f"Lỗi {response.status_code}"
-                    print(f"API Error: {response.text}") # In lỗi ra terminal để debug
+                    print(f"API Error: {response.text}")
                     self.ui.table.setItem(row, 4, QTableWidgetItem(err))
                     continue
 
@@ -377,7 +470,6 @@ class AppLogic:
                 
                 task_id = resp_json.get("task_id")
                 
-                # POLLING
                 progress.setLabelText(f"Dòng {row+1}: Đang xử lý...")
                 audio_url = None
                 for _ in range(30):
@@ -406,7 +498,8 @@ class AppLogic:
             progress.setValue(i+1)
         
         QMessageBox.information(self.ui, "Hoàn tất", "Xử lý xong!")
-    # --- CÁC HÀM CƠ BẢN KHÁC (GIỮ NGUYÊN) ---
+
+    # --- CÁC HÀM CƠ BẢN KHÁC ---
     def action_reset_all(self):
         if not self.current_folder: return
         reply = QMessageBox.question(self.ui, "Làm mới tất cả", "Reset dữ liệu?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
@@ -484,20 +577,6 @@ class AppLogic:
             rects = self.ui.viewer.get_rects()
             self.cached_rects[filename] = rects
 
-    def display_image(self, row):
-        self.save_current_rects_to_cache()
-        item = self.ui.image_list.item(row)
-        if not item: return
-        filename = item.text()
-        path = os.path.join(self.current_folder, filename)
-        if not os.path.exists(path): return
-        self.current_file_path = path
-        self.ui.viewer.set_image(QPixmap(path), maintain_zoom=True) 
-        self.current_cv_image = None
-        self.ui.viewer.clear_rects()
-        if filename in self.cached_rects:
-            for r in self.cached_rects[filename]: self.ui.viewer.add_rect(*r)
-        
     def action_auto_scan(self):
         if smart_cut is None:
             QMessageBox.critical(self.ui, "Lỗi", "Chưa cài 'opencv'.")
@@ -518,7 +597,14 @@ class AppLogic:
                 fname = item.text()
                 fpath = os.path.join(self.current_folder, fname)
                 try:
-                    rects, _ = smart_cut.analyze_panels_coordinates(fpath)
+                    # Dùng hàm đọc ảnh UTF-8
+                    from core.ocr_utils import read_image_utf8
+                    cv_img = read_image_utf8(fpath)
+                    
+                    rects = []
+                    if cv_img is not None:
+                         rects, _ = smart_cut.analyze_panels_coordinates(fpath) # Lưu ý: Smart cut của bạn cần hỗ trợ nhận numpy array, nếu không thì đoạn này vẫn có thể lỗi tên file
+                    
                     if rects is None: rects = []
                     adj_rects = [(x, y, w+w_adj, h+h_adj) for (x,y,w,h) in rects]
                     self.cached_rects[fname] = adj_rects
@@ -562,14 +648,13 @@ class AppLogic:
             if dock.radio_top.isChecked(): rects.sort(key=lambda r: r[1])
             else: rects.sort(key=lambda r: r[0])
             try:
-                stream = open(fpath, "rb")
-                bytes_data = bytearray(stream.read())
-                import numpy as np
-                np_arr = np.asarray(bytes_data, dtype=np.uint8)
-                img = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
-                prefix = os.path.splitext(fname)[0] + "_p"
-                saved = smart_cut.save_cropped_images(img, rects, output_folder, file_prefix=prefix)
-                saved_paths.extend(saved)
+                # Dùng hàm đọc UTF-8
+                from core.ocr_utils import read_image_utf8
+                img = read_image_utf8(fpath)
+                if img is not None:
+                    prefix = os.path.splitext(fname)[0] + "_p"
+                    saved = smart_cut.save_cropped_images(img, rects, output_folder, file_prefix=prefix)
+                    saved_paths.extend(saved)
             except: pass
             progress.setValue(i+1)
             

@@ -1,0 +1,4 @@
+GEMINI_API_KEY=AIzaSyB9w7zM4cTaJhEEWWWmbHlofOsEoVsjN7k
+TTS_API_KEY=Điền_Key_TTS_Vào_Đây
+
+watchfiles "python main.py"
